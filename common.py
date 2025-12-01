@@ -10,11 +10,7 @@ from tqdm.auto import tqdm
 from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning import Trainer, LightningModule
 
-
-# ---------------------------------------------------------------------------
 # Basic utilities: seeding, timestamps, bbox conversion, folders, image modes
-# ---------------------------------------------------------------------------
-
 def fixer_graine(graine: int = 42) -> None:
     """
     Fix random seeds for Python, NumPy and PyTorch (CPU + CUDA) to make
