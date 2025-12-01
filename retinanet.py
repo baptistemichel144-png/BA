@@ -23,6 +23,8 @@ from results import (
     visualiser_detections,
 )
 
+
+# Experiment configuration for RetinaNet on HRSID
 CONFIG = {
     "seed": 42,
     "epochs": 12,
@@ -44,10 +46,13 @@ CONFIG = {
 torch.backends.cudnn.benchmark = True
 
 
+
+# Model construction: RetinaNet with ResNet50-FPN backbone
 def construire_retinanet(nb_classes: int, pretrained_backbone: bool = True):
     from torchvision.models.detection import retinanet_resnet50_fpn
 
     try:
+        # Newer torchvision w/ explicit weights
         from torchvision.models import ResNet50_Weights
 
         modele = retinanet_resnet50_fpn(
@@ -60,6 +65,7 @@ def construire_retinanet(nb_classes: int, pretrained_backbone: bool = True):
         pass
 
     try:
+        # Fallback for intermediate API versions
         modele = retinanet_resnet50_fpn(
             pretrained=False,
             pretrained_backbone=pretrained_backbone,
@@ -67,14 +73,20 @@ def construire_retinanet(nb_classes: int, pretrained_backbone: bool = True):
         )
         return modele
     except TypeError:
+        # Older fallback
         modele = retinanet_resnet50_fpn(pretrained=False, num_classes=nb_classes)
         return modele
 
 
+
+# Main pipeline
+
 def main():
+    # 1) Reproducibility
     fixer_graine(CONFIG["seed"])
     ici = Path(__file__).resolve().parent
 
+    # 2) Dataset and annotation paths
     racine_donnees = ici / "HRSID"
     dossier_annotations = racine_donnees / "annotations"
     dossier_images = racine_donnees / "images"
@@ -85,25 +97,27 @@ def main():
     json_inshore = dossier_sousensembles / "inshore.json"
     json_offshore = dossier_sousensembles / "offshore.json"
 
+    # Sanity checks for required paths
     assert chemin_train.exists(), f"Missing: {chemin_train}"
     assert chemin_test.exists(), f"Missing: {chemin_test}"
     assert dossier_images.exists(), f"Missing images dir: {dossier_images}"
     assert json_inshore.exists(), f"Missing: {json_inshore}"
     assert json_offshore.exists(), f"Missing: {json_offshore}"
 
+    # 3) Create output directory for this run
     dossier_sortie = ici / "outputs" / tag_maintenant()
     creer_dossier(dossier_sortie)
     print(f"[info] Outputs -> {dossier_sortie}")
 
+    # 4) Select device (GPU if available)
     appareil = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     print(f"[info] Using device: {appareil}")
 
-    limite_train = CONFIG["max_images_debug"]
-    limite_test = CONFIG["max_images_debug"]
-
+    # 5) Build training / test datasets
     donnees_train = DonneesDetectionHRSID(dossier_images, chemin_train, augment=True, limit=limite_train)
     donnees_test = DonneesDetectionHRSID(dossier_images, chemin_test, augment=False, limit=limite_test)
 
+    # 6) Wrap dataset in DataLoaders
     chargeur_train = DataLoader(
         donnees_train,
         batch_size=CONFIG["batch_size_train"],
@@ -121,19 +135,23 @@ def main():
         pin_memory=True,
     )
 
+    # Two classes: background and ship
     nb_classes = 2
 
+    # 7) Build RetinaNet base model
     modele_de_base = construire_retinanet(
         nb_classes=nb_classes,
         pretrained_backbone=CONFIG["use_pretrained_backbone"],
     )
 
+    # 8) Wrap model in Lightning for training
     modele_lightning = ModuleDetectionLightning(
         modele_de_base,
         taux_apprentissage=CONFIG["learning_rate"],
         decay_poids=CONFIG["weight_decay"],
     )
 
+    # 9) Create Lightning Trainer
     entraineur = creer_trainer_arret_precoce(
         nb_epoques_max=CONFIG["epochs"],
         patience=CONFIG["early_stopping_patience"],
@@ -145,12 +163,15 @@ def main():
         dossier_racine_par_defaut=dossier_sortie,
     )
 
+    # 10) Train RetinaNet using Lightning
     print("[info] Training RetinaNet with PyTorch Lightning + EarlyStopping...")
     entraineur.fit(modele_lightning, train_dataloaders=chargeur_train, val_dataloaders=chargeur_val)
+
 
     modele = modele_lightning.modele
     modele.to(appareil)
 
+    # 12) Run inference on validation set and collect COCO-style detections
     predictions = inferer_et_collecter(
         modele,
         chargeur_val,
@@ -158,14 +179,18 @@ def main():
         seuil_score=CONFIG["confidence_threshold"],
     )
 
+    # Save detections in COCO result format
     chemin_detections = dossier_sortie / "detections_test.json"
     with open(chemin_detections, "w", encoding="utf-8") as f:
         json.dump(predictions, f)
     print(f"[save] Wrote COCO-format detections: {chemin_detections}")
 
+    # Load COCO test annotations as ground truth
     coco_verite = COCO(str(chemin_test))
 
+    # 13) Evaluate COCO metrics (overall + inshore/offshore subsets)
     if len(predictions) == 0:
+        # Edge case: no detections produced
         print("[warn] No detections produced; returning zero metrics.")
 
         ids_tous = coco_verite.getImgIds()
@@ -185,6 +210,7 @@ def main():
             "offshore": metriques_a_zero() if ids_offshore else metriques_a_zero(),
         }
     else:
+        # Evaluate predictions using COCO API
         coco_pred = coco_verite.loadRes(str(chemin_detections))
 
         nom_vers_id_test = {
@@ -208,12 +234,14 @@ def main():
             imprimer_tables_coco=CONFIG["print_coco_tables"],
         )
 
+    # Merge overall and subset metrics, then save
     metriques: Dict[str, Any] = {**metriques_all, **metriques_sub}
     chemin_metriques = dossier_sortie / "metrics.json"
     with open(chemin_metriques, "w", encoding="utf-8") as f:
         json.dump(metriques, f, indent=2)
     print(f"[save] Metrics JSON -> {chemin_metriques}")
 
+    # 14) Visualize some detections and save overlay images
     dossier_detections_images = ici / "detections"
     visualiser_detections(
         predictions,
@@ -224,6 +252,7 @@ def main():
         max_images_a_afficher=10,
         )
 
+    # 15) Print a concise summary table for overall / inshore / offshore
     afficher_table_metriques_unique(
         metriques_all,
         metriques_sub,
@@ -235,3 +264,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
